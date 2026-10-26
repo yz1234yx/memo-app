@@ -77,36 +77,88 @@ object UpdateUtil {
         }
     }
 
-    /** 下载 APK 到应用缓存目录，回调进度百分比。 */
+    /** 下载 APK 到应用缓存目录，回调进度百分比；自动重试 3 次，每次下载后做完整性校验。 */
     suspend fun download(
+        context: Context,
+        info: ReleaseInfo,
+        onProgress: (Int) -> Unit
+    ): File = withContext(Dispatchers.IO) {
+        var lastError: Exception? = null
+        repeat(3) { attempt ->
+            try {
+                onProgress(0)
+                val file = downloadOnce(context, info, onProgress)
+                verifyApk(context, file)
+                return@withContext file
+            } catch (e: Exception) {
+                lastError = e
+                File(context.cacheDir, "update-${info.version}.apk").delete()
+            }
+        }
+        throw java.io.IOException(
+            "安装包下载失败（已重试 3 次）：${lastError?.message ?: "网络不稳定"}。请稍后在网络良好时重试。"
+        )
+    }
+
+    private suspend fun downloadOnce(
         context: Context,
         info: ReleaseInfo,
         onProgress: (Int) -> Unit
     ): File = withContext(Dispatchers.IO) {
         val dest = File(context.cacheDir, "update-${info.version}.apk")
         val conn = open(info.apkUrl, accept = "application/octet-stream")
-        val total = conn.contentLengthLong
-        conn.inputStream.use { input ->
-            dest.outputStream().use { out ->
-                val buf = ByteArray(64 * 1024)
-                var read = 0L
-                var last = -1
-                while (true) {
-                    val n = input.read(buf)
-                    if (n < 0) break
-                    out.write(buf, 0, n)
-                    read += n
-                    if (total > 0) {
-                        val pct = (read * 100 / total).toInt()
-                        if (pct != last) {
-                            last = pct
-                            onProgress(pct)
+        try {
+            val total = conn.contentLengthLong
+            if (conn.responseCode != 200) {
+                throw java.io.IOException("下载源返回 HTTP ${conn.responseCode}")
+            }
+            conn.inputStream.use { input ->
+                dest.outputStream().use { out ->
+                    val buf = ByteArray(64 * 1024)
+                    var read = 0L
+                    var last = -1
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        read += n
+                        if (total > 0) {
+                            val pct = (read * 100 / total).toInt()
+                            if (pct != last) {
+                                last = pct
+                                onProgress(pct)
+                            }
                         }
+                    }
+                    if (total > 0 && read != total) {
+                        throw java.io.IOException("下载不完整（$read / $total 字节）")
                     }
                 }
             }
+            dest
+        } finally {
+            conn.disconnect()
         }
-        dest
+    }
+
+    /** 完整性校验：ZIP 魔数 + PackageManager 能解析出同名包。 */
+    private fun verifyApk(context: Context, file: File) {
+        if (file.length() < 1024 * 1024) {
+            throw java.io.IOException("安装包过小（${file.length()} 字节），疑似下载不完整")
+        }
+        file.inputStream().use { input ->
+            val magic = ByteArray(2)
+            if (input.read(magic) < 2 || magic[0] != 'P'.code.toByte() || magic[1] != 'K'.code.toByte()) {
+                throw java.io.IOException("文件不是有效的 APK（缺少 ZIP 魔数）")
+            }
+        }
+        val pinfo = context.packageManager.getPackageArchiveInfo(file.absolutePath, 0)
+        if (pinfo == null) {
+            throw java.io.IOException("安装包无法解析，下载可能已损坏")
+        }
+        if (pinfo.packageName != context.packageName) {
+            throw java.io.IOException("安装包内容与本应用不符（${pinfo.packageName}）")
+        }
     }
 
     /** 拉起系统安装器；未授予「安装未知应用」时先跳设置页，返回后重试即可。 */
