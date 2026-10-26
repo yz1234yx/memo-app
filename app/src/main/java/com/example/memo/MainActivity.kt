@@ -3,6 +3,7 @@
 package com.example.memo
 
 import android.content.Intent
+import android.graphics.Color as AwtColor
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
@@ -10,6 +11,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,30 +25,30 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -56,10 +58,15 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.memo.data.ExportUtil
 import com.example.memo.data.MemoDatabase
@@ -84,6 +91,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // 已授权时的首次冷启动：趁数据库还没打开，把内部存储的旧库搬到公共目录
         MemoDatabase.migrateToExternalIfNeeded(this)
+        // 状态栏与蓝色顶栏同色、白图标
+        @Suppress("DEPRECATION")
+        window.statusBarColor = AwtColor.parseColor("#2563EB")
+        WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = false
         setContent {
             MemoTheme {
                 Surface(
@@ -104,7 +115,7 @@ private fun MemoScreen(vm: MemoViewModel = viewModel()) {
     var query by remember { mutableStateOf("") }
     var editorOpen by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<Note?>(null) }
-    var menuOpen by remember { mutableStateOf(false) }
+    var settingsOpen by remember { mutableStateOf(false) }
     var pendingFormat by remember { mutableStateOf<ExportUtil.Format?>(null) }
     var updateState by remember { mutableStateOf<UpdateUtil.State?>(null) }
     val scope = rememberCoroutineScope()
@@ -121,6 +132,22 @@ private fun MemoScreen(vm: MemoViewModel = viewModel()) {
                 UpdateUtil.State.Ready(apk, info)
             } catch (e: Exception) {
                 UpdateUtil.State.Error("下载失败：${e.message ?: e.javaClass.simpleName}")
+            }
+        }
+    }
+
+    fun checkUpdate() {
+        settingsOpen = false
+        updateState = UpdateUtil.State.Checking
+        scope.launch {
+            val result = UpdateUtil.check(BuildConfig.GITHUB_REPO)
+            updateState = if (
+                result is UpdateUtil.State.Available &&
+                !UpdateUtil.isNewer(result.info.version, BuildConfig.VERSION_NAME)
+            ) {
+                UpdateUtil.State.UpToDate
+            } else {
+                result
             }
         }
     }
@@ -156,55 +183,6 @@ private fun MemoScreen(vm: MemoViewModel = viewModel()) {
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
-        topBar = {
-            TopAppBar(
-                title = { Text("备忘录") },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    actionIconContentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                ),
-                actions = {
-                    IconButton(onClick = { menuOpen = true }) {
-                        Icon(Icons.Default.MoreVert, contentDescription = "导出")
-                    }
-                    DropdownMenu(
-                        expanded = menuOpen,
-                        onDismissRequest = { menuOpen = false }
-                    ) {
-                        ExportUtil.Format.values().forEach { format ->
-                            DropdownMenuItem(
-                                text = { Text("导出为 " + format.label) },
-                                onClick = {
-                                    menuOpen = false
-                                    pendingFormat = format
-                                    exportLauncher.launch(ExportUtil.suggestFileName(format))
-                                }
-                            )
-                        }
-                        HorizontalDivider()
-                        DropdownMenuItem(
-                            text = { Text("检查更新") },
-                            onClick = {
-                                menuOpen = false
-                                updateState = UpdateUtil.State.Checking
-                                scope.launch {
-                                    val result = UpdateUtil.check(BuildConfig.GITHUB_REPO)
-                                    updateState = if (
-                                        result is UpdateUtil.State.Available &&
-                                        !UpdateUtil.isNewer(result.info.version, BuildConfig.VERSION_NAME)
-                                    ) {
-                                        UpdateUtil.State.UpToDate
-                                    } else {
-                                        result
-                                    }
-                                }
-                            }
-                        )
-                    }
-                }
-            )
-        },
         floatingActionButton = {
             ExtendedFloatingActionButton(
                 text = { Text("新增") },
@@ -223,36 +201,87 @@ private fun MemoScreen(vm: MemoViewModel = viewModel()) {
                 .padding(padding)
                 .fillMaxSize()
         ) {
+            // ── 蓝色头部：标题 + 设置入口 + 筛选 + 统计 ──
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.primary)
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "备忘录",
+                        color = Color.White,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color.White.copy(alpha = 0.16f),
+                        onClick = { settingsOpen = true }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Settings,
+                                contentDescription = null,
+                                tint = Color.White
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("设置", color = Color.White, fontSize = 14.sp)
+                        }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Filter.values().forEach { item ->
+                        HeaderPill(
+                            label = item.label,
+                            selected = filter == item,
+                            onClick = { filter = item }
+                        )
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    text = "共 ${notes.size} 条记录 · 记得定期导出备份 · 版本 ${BuildConfig.VERSION_NAME}",
+                    color = Color.White.copy(alpha = 0.75f),
+                    fontSize = 12.sp
+                )
+            }
+
             if (!MemoDatabase.hasAllFilesAccess()) {
                 StorageBanner()
             }
+
+            // ── 搜索框：白色圆角卡片 ──
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
-                placeholder = { Text("搜索标题或备注") },
-                singleLine = true,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-            )
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Filter.values().forEach { item ->
-                    FilterChip(
-                        selected = filter == item,
-                        onClick = { filter = item },
-                        label = { Text(item.label) }
+                placeholder = { Text("搜索标题或备注", color = MaterialTheme.colorScheme.outline) },
+                leadingIcon = {
+                    Icon(
+                        Icons.Default.Search,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.outline
                     )
-                }
-            }
-
-            Spacer(Modifier.height(8.dp))
-            HorizontalDivider()
+                },
+                singleLine = true,
+                shape = RoundedCornerShape(14.dp),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = MaterialTheme.colorScheme.surface,
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                    focusedBorderColor = Color.Transparent,
+                    unfocusedBorderColor = Color.Transparent
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 10.dp)
+            )
 
             if (visible.isEmpty()) {
                 Box(
@@ -297,6 +326,20 @@ private fun MemoScreen(vm: MemoViewModel = viewModel()) {
         )
     }
 
+    if (settingsOpen) {
+        SettingsSheet(
+            version = BuildConfig.VERSION_NAME,
+            updateState = updateState,
+            onExport = { format ->
+                settingsOpen = false
+                pendingFormat = format
+                exportLauncher.launch(ExportUtil.suggestFileName(format))
+            },
+            onCheckUpdate = { checkUpdate() },
+            onDismiss = { settingsOpen = false }
+        )
+    }
+
     updateState?.let { st ->
         AlertDialog(
             onDismissRequest = { if (st !is UpdateUtil.State.Downloading) updateState = null },
@@ -307,7 +350,7 @@ private fun MemoScreen(vm: MemoViewModel = viewModel()) {
                     is UpdateUtil.State.NotConfigured ->
                         Text("升级源未配置。请在 gradle.properties 填写 GITHUB_REPO 后重新构建安装。")
                     is UpdateUtil.State.UpToDate ->
-                        Text("已是最新版本 ${BuildConfig.VERSION_NAME}")
+                        Text("已经是最新版本（${BuildConfig.VERSION_NAME}）")
                     is UpdateUtil.State.Available -> Column {
                         Text("发现新版本 ${st.info.version}（当前 ${BuildConfig.VERSION_NAME}）")
                         if (st.info.releaseNotes.isNotBlank()) {
@@ -352,33 +395,211 @@ private fun MemoScreen(vm: MemoViewModel = viewModel()) {
     }
 }
 
+/** 顶栏里的筛选药丸：选中白底蓝字，未选中半透明白底白字。 */
+@Composable
+private fun HeaderPill(label: String, selected: Boolean, onClick: () -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = if (selected) Color.White else Color.White.copy(alpha = 0.18f),
+        onClick = onClick
+    ) {
+        Text(
+            text = label,
+            color = if (selected) MaterialTheme.colorScheme.primary else Color.White,
+            fontSize = 14.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+        )
+    }
+}
+
+/** 设置面板：浅灰底 + 白色分区卡片 + 大圆角按钮，对照参考版式。 */
+@Composable
+private fun SettingsSheet(
+    version: String,
+    updateState: UpdateUtil.State?,
+    onExport: (ExportUtil.Format) -> Unit,
+    onCheckUpdate: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.background
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 16.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                text = "设置",
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onBackground
+            )
+            SectionCard {
+                Text(
+                    text = "导出",
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(
+                        "CSV" to ExportUtil.Format.CSV,
+                        "JSON" to ExportUtil.Format.JSON,
+                        "Markdown" to ExportUtil.Format.MARKDOWN
+                    ).forEach { (label, format) ->
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.primary,
+                            onClick = { onExport(format) },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 12.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = label,
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Caption(
+                    "会先让你选保存位置，再写出文件。可以直接用微信发出去，也能在电脑上打开。" +
+                        "建议隔一段时间导出一次，留个备份。"
+                )
+            }
+            SectionCard {
+                Text(
+                    text = "关于",
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "备忘录  版本 $version",
+                    color = MaterialTheme.colorScheme.primary,
+                    fontSize = 15.sp
+                )
+                Spacer(Modifier.height(10.dp))
+                BigButton("检查更新", filled = true) { onCheckUpdate() }
+                Spacer(Modifier.height(8.dp))
+                Caption(
+                    when (updateState) {
+                        is UpdateUtil.State.UpToDate -> "已经是最新版本（$version）"
+                        is UpdateUtil.State.Available -> "发现新版本 ${updateState.info.version}，已弹出确认框"
+                        is UpdateUtil.State.Error -> updateState.message
+                        else -> "将连接 GitHub 检查是否有新版本"
+                    }
+                )
+            }
+            BigButton("关闭", filled = false) { onDismiss() }
+            Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
+@Composable
+private fun SectionCard(content: @Composable () -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surface,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) { content() }
+    }
+}
+
+/** 大圆角整宽按钮：filled=蓝色主按钮，否则浅灰次按钮。 */
+@Composable
+private fun BigButton(text: String, filled: Boolean, onClick: () -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = if (filled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer,
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 13.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = text,
+                color = if (filled) {
+                    MaterialTheme.colorScheme.onPrimary
+                } else {
+                    MaterialTheme.colorScheme.onSecondaryContainer
+                },
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+    }
+}
+
+@Composable
+private fun Caption(text: String) {
+    Text(
+        text = text,
+        fontSize = 13.sp,
+        lineHeight = 19.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+}
+
 @Composable
 private fun StorageBanner() {
     val context = LocalContext.current
     Surface(
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        modifier = Modifier.fillMaxWidth()
+        color = MaterialTheme.colorScheme.surface,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        shape = RoundedCornerShape(14.dp)
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
                 text = "记录暂存于应用内部，卸载会丢失。授权后保存到 /sdcard/MemoApp，下次打开自动迁移。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f)
             )
-            TextButton(onClick = {
-                val exact = Intent(
-                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                    Uri.parse("package:${context.packageName}")
-                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                val fallback = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                runCatching { context.startActivity(exact) }
-                    .onFailure { context.startActivity(fallback) }
-            }) { Text("去授权") }
+            Text(
+                text = "去授权",
+                color = MaterialTheme.colorScheme.primary,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .padding(start = 8.dp)
+                    .clickable {
+                        val exact = Intent(
+                            Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                            Uri.parse("package:${context.packageName}")
+                        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        val fallback = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        runCatching { context.startActivity(exact) }
+                            .onFailure { context.startActivity(fallback) }
+                    }
+            )
         }
     }
 }
@@ -391,37 +612,39 @@ private fun NoteRow(
 ) {
     val formatter = remember { SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()) }
 
-    // 已完成条目铺青绿底色，未完成铺淡靛蓝底色，弱化分割线、强化状态。
+    // 白色圆角卡片；已完成整卡淡蓝底、勾选框蓝色，与参考版式一致的克制风格。
     Surface(
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(18.dp),
         color = if (note.done) {
-            MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.55f)
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
         } else {
-            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.40f)
+            MaterialTheme.colorScheme.surface
         },
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 5.dp)
+            .padding(horizontal = 16.dp, vertical = 5.dp)
     ) {
         Row(
             modifier = Modifier
                 .clickable(onClick = onClick)
-                .padding(horizontal = 8.dp, vertical = 10.dp),
+                .padding(horizontal = 12.dp, vertical = 12.dp),
             verticalAlignment = Alignment.Top
         ) {
             Checkbox(
                 checked = note.done,
                 onCheckedChange = { onToggle() },
                 colors = CheckboxDefaults.colors(
-                    checkedColor = MaterialTheme.colorScheme.tertiary,
-                    checkmarkColor = MaterialTheme.colorScheme.onTertiary
+                    checkedColor = MaterialTheme.colorScheme.primary,
+                    checkmarkColor = MaterialTheme.colorScheme.onPrimary
                 )
             )
-            Spacer(Modifier.width(4.dp))
+            Spacer(Modifier.width(6.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = note.title,
-                    style = MaterialTheme.typography.bodyLarge,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    lineHeight = 23.sp,
                     textDecoration = if (note.done) TextDecoration.LineThrough else null,
                     color = if (note.done) {
                         MaterialTheme.colorScheme.onSurfaceVariant
@@ -430,16 +653,17 @@ private fun NoteRow(
                     }
                 )
                 if (note.body.isNotBlank()) {
-                    Spacer(Modifier.height(2.dp))
+                    Spacer(Modifier.height(3.dp))
                     Text(
                         text = note.body,
-                        style = MaterialTheme.typography.bodySmall,
+                        fontSize = 14.sp,
+                        lineHeight = 20.sp,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(5.dp))
                 val stamp = if (note.done) {
                     "完成于 " + formatter.format(Date(note.doneAt ?: note.updatedAt))
                 } else {
@@ -447,12 +671,8 @@ private fun NoteRow(
                 }
                 Text(
                     text = stamp,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (note.done) {
-                        MaterialTheme.colorScheme.tertiary
-                    } else {
-                        MaterialTheme.colorScheme.outline
-                    }
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.outline
                 )
             }
         }
