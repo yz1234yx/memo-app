@@ -6,7 +6,9 @@ import android.content.Intent
 import android.graphics.Color as AwtColor
 import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -16,6 +18,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -38,7 +41,6 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -50,6 +52,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -71,6 +74,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.memo.data.ExportUtil
 import com.example.memo.data.MemoDatabase
 import com.example.memo.data.Note
+import com.example.memo.data.Storage
 import com.example.memo.ui.MemoTheme
 import com.example.memo.ui.NoteEditorDialog
 import com.example.memo.update.UpdateUtil
@@ -87,10 +91,14 @@ private enum class Filter(val label: String) {
 }
 
 class MainActivity : ComponentActivity() {
+
+    /** 每次回到前台自增：用于在用户从系统设置授权后立即感知权限变化。 */
+    private val resumeTick = mutableStateOf(0)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // 已授权时的首次冷启动：趁数据库还没打开，把内部存储的旧库搬到公共目录
-        MemoDatabase.migrateToExternalIfNeeded(this)
+        // 已授权时的首次冷启动：把内部存储的旧库搬到指定文件夹
+        MemoDatabase.prepare(this)
         // 状态栏与蓝色顶栏同色、白图标
         @Suppress("DEPRECATION")
         window.statusBarColor = AwtColor.parseColor("#2563EB")
@@ -101,15 +109,20 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    MemoScreen()
+                    MemoScreen(resumeTick = resumeTick.value)
                 }
             }
         }
     }
+
+    override fun onResume() {
+        super.onResume()
+        resumeTick.value++
+    }
 }
 
 @Composable
-private fun MemoScreen(vm: MemoViewModel = viewModel()) {
+private fun MemoScreen(vm: MemoViewModel = viewModel(), resumeTick: Int = 0) {
     val notes by vm.notes.collectAsState()
     var filter by remember { mutableStateOf(Filter.ALL) }
     var query by remember { mutableStateOf("") }
@@ -118,8 +131,44 @@ private fun MemoScreen(vm: MemoViewModel = viewModel()) {
     var settingsOpen by remember { mutableStateOf(false) }
     var pendingFormat by remember { mutableStateOf<ExportUtil.Format?>(null) }
     var updateState by remember { mutableStateOf<UpdateUtil.State?>(null) }
-    val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    var hasAccess by remember { mutableStateOf(MemoDatabase.hasAllFilesAccess()) }
+    var storagePath by remember { mutableStateOf(MemoDatabase.dbFile(context).absolutePath) }
+    val scope = rememberCoroutineScope()
+
+    // 从系统设置授权回来：自动启用公共存储并把原有记录接上，不用再选文件夹
+    LaunchedEffect(resumeTick) {
+        val now = MemoDatabase.hasAllFilesAccess()
+        if (now && !hasAccess) {
+            hasAccess = true
+            MemoDatabase.closeInstance()
+            MemoDatabase.prepare(context)
+            vm.reloadStorage()
+            storagePath = MemoDatabase.dbFile(context).absolutePath
+            Toast.makeText(
+                context,
+                "已启用公共存储，记录已从原文件夹读回：${shortPath(storagePath)}",
+                Toast.LENGTH_LONG
+            ).show()
+        } else if (!now && hasAccess) {
+            hasAccess = false
+            vm.reloadStorage()
+            storagePath = MemoDatabase.dbFile(context).absolutePath
+        } else {
+            storagePath = MemoDatabase.dbFile(context).absolutePath
+        }
+    }
+
+    fun openAllFilesSettings() {
+        val exact = Intent(
+            Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+            Uri.parse("package:${context.packageName}")
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val fallback = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { context.startActivity(exact) }
+            .onFailure { runCatching { context.startActivity(fallback) } }
+    }
 
     // 「发现新版本」后真正发起下载
     fun startDownload(info: UpdateUtil.ReleaseInfo) {
@@ -165,6 +214,32 @@ private fun MemoScreen(vm: MemoViewModel = viewModel()) {
                 }
             }
         }
+    }
+
+    // 选存放文件夹：系统文件选择器选目录，映射成绝对路径后把库搬过去
+    val folderLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val dir = Storage.uriToDir(uri)
+        if (dir == null) {
+            Toast.makeText(context, "这个位置无法直接存放数据库，换成本机存储里的文件夹试试", Toast.LENGTH_LONG).show()
+            return@rememberLauncherForActivityResult
+        }
+        runCatching {
+            MemoDatabase.closeInstance()   // 先关库，保证 -wal 已落盘再复制
+            Storage.switchTo(context, dir)
+        }
+            .onSuccess {
+                settingsOpen = false
+                vm.reloadStorage()
+                storagePath = MemoDatabase.dbFile(context).absolutePath
+                Toast.makeText(context, "已切换到 ${shortPath(storagePath)}", Toast.LENGTH_LONG).show()
+            }
+            .onFailure {
+                vm.reloadStorage()
+                Toast.makeText(context, "切换失败：${it.message}", Toast.LENGTH_LONG).show()
+            }
     }
 
     val visible = remember(notes, filter, query) {
@@ -253,10 +328,6 @@ private fun MemoScreen(vm: MemoViewModel = viewModel()) {
                 )
             }
 
-            if (!MemoDatabase.hasAllFilesAccess()) {
-                StorageBanner()
-            }
-
             // ── 搜索框：白色圆角卡片 ──
             OutlinedTextField(
                 value = query,
@@ -280,7 +351,7 @@ private fun MemoScreen(vm: MemoViewModel = viewModel()) {
                 ),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 10.dp)
+                    .padding(horizontal = 16.dp, vertical = 7.dp)
             )
 
             if (visible.isEmpty()) {
@@ -295,7 +366,10 @@ private fun MemoScreen(vm: MemoViewModel = viewModel()) {
                     )
                 }
             } else {
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(bottom = 88.dp)
+                ) {
                     items(visible, key = { it.id }) { note ->
                         NoteRow(
                             note = note,
@@ -330,12 +404,16 @@ private fun MemoScreen(vm: MemoViewModel = viewModel()) {
         SettingsSheet(
             version = BuildConfig.VERSION_NAME,
             updateState = updateState,
+            hasAccess = hasAccess,
+            storageLabel = if (hasAccess) shortPath(storagePath) else Storage.INTERNAL_HINT,
             onExport = { format ->
                 settingsOpen = false
                 pendingFormat = format
                 exportLauncher.launch(ExportUtil.suggestFileName(format))
             },
             onCheckUpdate = { checkUpdate() },
+            onGrantAccess = { openAllFilesSettings() },
+            onPickFolder = { folderLauncher.launch(null) },
             onDismiss = { settingsOpen = false }
         )
     }
@@ -395,7 +473,12 @@ private fun MemoScreen(vm: MemoViewModel = viewModel()) {
     }
 }
 
-/** 顶栏里的筛选药丸：选中白底蓝字，未选中半透明白底白字。 */
+/** /storage/emulated/0/xxx → /sdcard/xxx，手机上看起来更短。 */
+private fun shortPath(path: String): String {
+    val root = Environment.getExternalStorageDirectory().absolutePath
+    return if (path.startsWith(root)) "/sdcard" + path.removePrefix(root) else path
+}
+
 @Composable
 private fun HeaderPill(label: String, selected: Boolean, onClick: () -> Unit) {
     Surface(
@@ -418,8 +501,12 @@ private fun HeaderPill(label: String, selected: Boolean, onClick: () -> Unit) {
 private fun SettingsSheet(
     version: String,
     updateState: UpdateUtil.State?,
+    hasAccess: Boolean,
+    storageLabel: String,
     onExport: (ExportUtil.Format) -> Unit,
     onCheckUpdate: () -> Unit,
+    onGrantAccess: () -> Unit,
+    onPickFolder: () -> Unit,
     onDismiss: () -> Unit
 ) {
     ModalBottomSheet(
@@ -430,7 +517,7 @@ private fun SettingsSheet(
             modifier = Modifier
                 .padding(horizontal = 16.dp)
                 .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text(
                 text = "设置",
@@ -438,6 +525,34 @@ private fun SettingsSheet(
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onBackground
             )
+            SectionCard {
+                Text(
+                    text = "存储位置",
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = storageLabel,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp
+                )
+                Spacer(Modifier.height(10.dp))
+                if (hasAccess) {
+                    BigButton("选择存放文件夹", filled = true) { onPickFolder() }
+                } else {
+                    BigButton("开启所有文件访问权限", filled = true) { onGrantAccess() }
+                    Spacer(Modifier.height(8.dp))
+                    Caption("没开这项权限时，记录只能存在应用内部，卸载会一起删掉。开启后应用会自动把记录搬到公共文件夹，并把之前存在那里的记录读回来。")
+                }
+                Spacer(Modifier.height(8.dp))
+                Caption(
+                    "记录是单个 memo.db 文件，放在上面这个文件夹里，卸载应用不会删。" +
+                        "重装后到这一栏点「开启所有文件访问权限」，会自动找回原记录，不用重新选文件夹。"
+                )
+            }
             SectionCard {
                 Text(
                     text = "导出",
@@ -476,8 +591,7 @@ private fun SettingsSheet(
                 }
                 Spacer(Modifier.height(8.dp))
                 Caption(
-                    "会先让你选保存位置，再写出文件。可以直接用微信发出去，也能在电脑上打开。" +
-                        "建议隔一段时间导出一次，留个备份。"
+                    "会先让你选保存位置，再写出文件。可以直接用微信发出去，也能在电脑上打开。"
                 )
             }
             SectionCard {
@@ -562,49 +676,6 @@ private fun Caption(text: String) {
 }
 
 @Composable
-private fun StorageBanner() {
-    val context = LocalContext.current
-    Surface(
-        color = MaterialTheme.colorScheme.surface,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        shape = RoundedCornerShape(14.dp)
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "记录暂存于应用内部，卸载会丢失。授权后保存到 /sdcard/MemoApp，下次打开自动迁移。",
-                fontSize = 13.sp,
-                lineHeight = 18.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.weight(1f)
-            )
-            Text(
-                text = "去授权",
-                color = MaterialTheme.colorScheme.primary,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier
-                    .padding(start = 8.dp)
-                    .clickable {
-                        val exact = Intent(
-                            Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                            Uri.parse("package:${context.packageName}")
-                        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        val fallback = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        runCatching { context.startActivity(exact) }
-                            .onFailure { context.startActivity(fallback) }
-                    }
-            )
-        }
-    }
-}
-
-@Composable
 private fun NoteRow(
     note: Note,
     onToggle: () -> Unit,
@@ -614,7 +685,7 @@ private fun NoteRow(
 
     // 白色圆角卡片；已完成整卡淡蓝底、勾选框蓝色，与参考版式一致的克制风格。
     Surface(
-        shape = RoundedCornerShape(18.dp),
+        shape = RoundedCornerShape(16.dp),
         color = if (note.done) {
             MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
         } else {
@@ -622,12 +693,12 @@ private fun NoteRow(
         },
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 5.dp)
+            .padding(horizontal = 16.dp, vertical = 3.dp)
     ) {
         Row(
             modifier = Modifier
                 .clickable(onClick = onClick)
-                .padding(horizontal = 12.dp, vertical = 12.dp),
+                .padding(horizontal = 10.dp, vertical = 9.dp),
             verticalAlignment = Alignment.Top
         ) {
             Checkbox(
@@ -638,13 +709,13 @@ private fun NoteRow(
                     checkmarkColor = MaterialTheme.colorScheme.onPrimary
                 )
             )
-            Spacer(Modifier.width(6.dp))
+            Spacer(Modifier.width(4.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = note.title,
                     fontSize = 17.sp,
                     fontWeight = FontWeight.SemiBold,
-                    lineHeight = 23.sp,
+                    lineHeight = 22.sp,
                     textDecoration = if (note.done) TextDecoration.LineThrough else null,
                     color = if (note.done) {
                         MaterialTheme.colorScheme.onSurfaceVariant
@@ -653,17 +724,17 @@ private fun NoteRow(
                     }
                 )
                 if (note.body.isNotBlank()) {
-                    Spacer(Modifier.height(3.dp))
+                    Spacer(Modifier.height(2.dp))
                     Text(
                         text = note.body,
                         fontSize = 14.sp,
-                        lineHeight = 20.sp,
+                        lineHeight = 19.sp,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                Spacer(Modifier.height(5.dp))
+                Spacer(Modifier.height(3.dp))
                 val stamp = if (note.done) {
                     "完成于 " + formatter.format(Date(note.doneAt ?: note.updatedAt))
                 } else {
