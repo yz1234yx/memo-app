@@ -13,8 +13,7 @@ import java.net.URL
 
 /**
  * GitHub Releases 升级检查。
- * 私有仓库的 API 与资源下载都要带 Bearer token；token 由 gradle.properties 注入 BuildConfig，
- * 不出现在源码里，也不要把带真实 token 的 gradle.properties 提交进仓库。
+ * 公共仓库模式：API 与资源下载均无需鉴权。
  */
 object UpdateUtil {
 
@@ -35,20 +34,16 @@ object UpdateUtil {
         data class Error(val message: String) : State()
     }
 
-    /** 拉取最新 Release；仓库没有 Release、网络失败、token 无效都会以 Error 返回。 */
-    suspend fun check(repo: String, token: String): State = withContext(Dispatchers.IO) {
+    /** 拉取最新 Release；仓库没有 Release、网络失败都会以 Error 返回。 */
+    suspend fun check(repo: String): State = withContext(Dispatchers.IO) {
         if (repo.isBlank()) return@withContext State.NotConfigured
         try {
             val conn = open(
                 "https://api.github.com/repos/$repo/releases/latest",
-                token,
                 accept = "application/vnd.github+json"
             )
             val code = conn.responseCode
             if (code == 404) return@withContext State.Error("仓库还没有发布任何版本")
-            if (code == 401 || code == 403) {
-                return@withContext State.Error("访问被拒绝：请检查仓库地址与 token 是否只读有效")
-            }
             if (code != 200) return@withContext State.Error("GitHub 返回 HTTP $code")
             val body = conn.inputStream.bufferedReader().use { it.readText() }
             val json = JSONObject(body)
@@ -86,11 +81,10 @@ object UpdateUtil {
     suspend fun download(
         context: Context,
         info: ReleaseInfo,
-        token: String,
         onProgress: (Int) -> Unit
     ): File = withContext(Dispatchers.IO) {
         val dest = File(context.cacheDir, "update-${info.version}.apk")
-        val conn = open(info.apkUrl, token, accept = "application/octet-stream")
+        val conn = open(info.apkUrl, accept = "application/octet-stream")
         val total = conn.contentLengthLong
         conn.inputStream.use { input ->
             dest.outputStream().use { out ->
@@ -150,15 +144,12 @@ object UpdateUtil {
         return false
     }
 
-    private fun open(url: String, token: String, accept: String): HttpURLConnection {
+    private fun open(url: String, accept: String): HttpURLConnection {
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.connectTimeout = 10_000
         conn.readTimeout = 30_000
         conn.setRequestProperty("Accept", accept)
         conn.setRequestProperty("User-Agent", "MemoApp-Updater")
-        if (token.isNotBlank()) {
-            conn.setRequestProperty("Authorization", "Bearer $token")
-        }
         return conn
     }
 }

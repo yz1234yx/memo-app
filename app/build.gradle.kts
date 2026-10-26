@@ -13,14 +13,12 @@ android {
         applicationId = "com.example.memo"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.0.3"
 
-        // 升级源：值写在 gradle.properties（不要提交真实 token 到仓库）
+        // 升级源：公共仓库，值写在 gradle.properties（无需 token）
         val ghRepo = (project.findProperty("GITHUB_REPO") as String?) ?: ""
-        val ghToken = (project.findProperty("GITHUB_TOKEN") as String?) ?: ""
         buildConfigField("String", "GITHUB_REPO", "\"$ghRepo\"")
-        buildConfigField("String", "GITHUB_TOKEN", "\"$ghToken\"")
     }
 
     buildTypes {

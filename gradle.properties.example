@@ -1,5 +1,3 @@
 # 复制为 gradle.properties 并填入真实值（gradle.properties 已被 .gitignore 忽略）
-# 升级源：GitHub 用户/仓库名
+# 升级源：GitHub 公共仓库，用户/仓库名，无需 token
 GITHUB_REPO=yz1234yx/memo-app
-# 只读 fine-grained token（仅该仓库 Contents:Read）
-GITHUB_TOKEN=

@@ -115,7 +115,7 @@ private fun MemoScreen(vm: MemoViewModel = viewModel()) {
         updateState = UpdateUtil.State.Downloading(0)
         scope.launch {
             updateState = try {
-                val apk = UpdateUtil.download(context, info, BuildConfig.GITHUB_TOKEN) { pct ->
+                val apk = UpdateUtil.download(context, info) { pct ->
                     updateState = UpdateUtil.State.Downloading(pct)
                 }
                 UpdateUtil.State.Ready(apk, info)
@@ -189,9 +189,7 @@ private fun MemoScreen(vm: MemoViewModel = viewModel()) {
                                 menuOpen = false
                                 updateState = UpdateUtil.State.Checking
                                 scope.launch {
-                                    updateState = UpdateUtil.check(
-                                        BuildConfig.GITHUB_REPO, BuildConfig.GITHUB_TOKEN
-                                    )
+                                    updateState = UpdateUtil.check(BuildConfig.GITHUB_REPO)
                                 }
                             }
                         )
@@ -299,7 +297,7 @@ private fun MemoScreen(vm: MemoViewModel = viewModel()) {
                 when (st) {
                     is UpdateUtil.State.Checking -> Text("正在连接 GitHub…")
                     is UpdateUtil.State.NotConfigured ->
-                        Text("升级源未配置。请在 gradle.properties 填写 GITHUB_REPO 与 GITHUB_TOKEN 后重新构建安装。")
+                        Text("升级源未配置。请在 gradle.properties 填写 GITHUB_REPO 后重新构建安装。")
                     is UpdateUtil.State.UpToDate ->
                         Text("已是最新版本 ${BuildConfig.VERSION_NAME}")
                     is UpdateUtil.State.Available -> Column {
