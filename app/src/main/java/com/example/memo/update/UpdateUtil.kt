@@ -132,13 +132,15 @@ object UpdateUtil {
         context.startActivity(intent)
     }
 
-    /** 版本号比较：按 '.' 分段取数字，1.10 > 1.9；无法解析时按字符串不等处理。 */
+    /** 版本号比较：按 '.' 分段取前导数字（"4-test" 按 4 算），1.10 > 1.9；无数字段按 0 处理。 */
     fun isNewer(remote: String, current: String): Boolean {
-        val r = remote.removePrefix("v").removePrefix("V").split('.')
-        val c = current.removePrefix("v").removePrefix("V").split('.')
+        fun seg(v: String) = v.removePrefix("v").removePrefix("V").split('.')
+            .map { part -> Regex("^\\d+").find(part?.trim() ?: "")?.value?.toIntOrNull() ?: 0 }
+        val r = seg(remote)
+        val c = seg(current)
         for (i in 0 until maxOf(r.size, c.size)) {
-            val ri = r.getOrNull(i)?.toIntOrNull() ?: 0
-            val ci = c.getOrNull(i)?.toIntOrNull() ?: 0
+            val ri = r.getOrNull(i) ?: 0
+            val ci = c.getOrNull(i) ?: 0
             if (ri != ci) return ri > ci
         }
         return false

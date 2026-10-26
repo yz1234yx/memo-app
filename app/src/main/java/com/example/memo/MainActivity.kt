@@ -189,7 +189,15 @@ private fun MemoScreen(vm: MemoViewModel = viewModel()) {
                                 menuOpen = false
                                 updateState = UpdateUtil.State.Checking
                                 scope.launch {
-                                    updateState = UpdateUtil.check(BuildConfig.GITHUB_REPO)
+                                    val result = UpdateUtil.check(BuildConfig.GITHUB_REPO)
+                                    updateState = if (
+                                        result is UpdateUtil.State.Available &&
+                                        !UpdateUtil.isNewer(result.info.version, BuildConfig.VERSION_NAME)
+                                    ) {
+                                        UpdateUtil.State.UpToDate
+                                    } else {
+                                        result
+                                    }
                                 }
                             }
                         )
